@@ -26,5 +26,23 @@ check "Межсетевой экран активен" "active" "$(awk '/^Status
 check "Входящий трафик запрещён по умолчанию" "deny" "$(sed -nE 's/^Default: ([^ ]+) \(incoming\).*/\1/p' <<< "$UFW_STATUS")"
 echo "[3] Учётные записи"
 awk -F: '$3>=1000 && $3<65534 {printf "    %s (uid=%s)\n",$1,$3}' /etc/passwd
+echo "[4] Веб-сервер"
+check "Служба nginx активна" "active" "$(systemctl is-active nginx)"
+NGINX_SYNTAX=no
+sudo nginx -t >/dev/null 2>&1 && NGINX_SYNTAX=yes
+check "Конфигурация nginx корректна" "yes" "$NGINX_SYNTAX"
+CERT_MIN_DAYS="${CERT_MIN_DAYS:-30}"
+CERT_OK=no
+if [[ "$CERT_MIN_DAYS" =~ ^[0-9]+$ ]] && \
+    openssl x509 -in /etc/ssl/certs/devops.crt -noout \
+    -checkend "$((CERT_MIN_DAYS * 86400))" >/dev/null 2>&1; then
+    CERT_OK=yes
+fi
+check "Сертификат действителен ещё минимум ${CERT_MIN_DAYS} дней" "yes" "$CERT_OK"
+WEB_PERMISSIONS=no
+WORLD_WRITABLE="$(find /var/www/devops-site -perm -o+w 2>&1)"
+KEY_MODE="$(sudo stat -c '%a' /etc/ssl/private/devops.key)"
+[[ -z "$WORLD_WRITABLE" && "$KEY_MODE" == 600 ]] && WEB_PERMISSIONS=yes
+check "Нет записи для всех; закрытый ключ имеет права 600" "yes" "$WEB_PERMISSIONS"
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

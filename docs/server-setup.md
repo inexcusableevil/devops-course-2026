@@ -54,6 +54,8 @@ Host devops
     ControlPersist 120
 ```
 
+Для прямого подключения по Host-only добавлен отдельный блок `Host devops.local` с `HostName devops.local`, `Port 2222`, `User devops`, `IdentityFile ~/.ssh/devops_vm`, `IdentitiesOnly yes`. Блок `Host devops` сам по себе не применяется к имени devops.local; без второго блока клиент не предъявлял выделенный ключ.
+
 Мультиплексирование позволяет повторно использовать одно SSH-соединение и не исчерпывать лимит UFW при последовательных командах доставки. Для завершения: `ssh -O exit devops`.
 
 ## 5. Служба SSH

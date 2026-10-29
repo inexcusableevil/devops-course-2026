@@ -186,3 +186,86 @@ HTTP перенаправляется кодом 301 на HTTPS. HSTS для у�
 Создан снимок `04-nginx-https` (UUID ec12bad8-86b0-4fee-bc3d-381b99dda5cc) на выключенной VM после успешных проверок TLS, деплоя и прав. Попытка живого снимка затянулась, отменена; VirtualBox оставил VMM приостановленным при внешнем состоянии Running. После разрешённого владельцем принудительного выключения сделан обычный снимок, VM запущена заново и конфигурация проверена. Конфигурация, сертификат, ключ и снимки сохраняются для практической работы №7.
 
 Подготовка Docker: установлен официальный Docker Engine Community 29.9.2, Compose 5.6.1 из подписанного репозитория download.docker.com (Ubuntu noble/arm64), не docker.io. Учётная запись devops добавлена в docker (у неё уже есть sudo). Проверка `docker run hello-world` без sudo выполнена в новой группе через `sg docker -c`; получено Hello from Docker. Участник docker фактически имеет возможности root через подключение каталогов хоста. Полная последовательность установки сохранена в разделе 9 для восстановления конфигурации приложения.
+
+
+## 9. Контейнеризация
+
+Docker Engine Community 29.9.2 и Compose 5.6.1 установлены из официального подписанного репозитория Docker, Ubuntu noble/arm64. Пакет docker.io не устанавливался. В группе docker — devops, уже имеющий sudo. Членство даёт фактические возможности root через Docker API, поэтому дополнительных пользователей в группу не добавляем. Для применения членства нужна новая SSH-сессия; при существующем ControlMaster завершить её командой ssh -O exit devops и подключиться заново, либо однократно использовать sg docker -c.
+
+Установка из официального репозитория (VM):
+
+```sh
+set -e
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl --connect-timeout 10 --max-time 60 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops
+# После новой SSH-сессии
+docker version
+docker compose version
+docker run --rm hello-world
+```
+
+Проект на сервере — `/home/devops/app`, владелец devops:devops. Исходники, Dockerfile, требования и docker-compose.yml находятся в `app/` репозитория. Зависимости шаблона зафиксированы: Flask 3.0.3, psycopg2-binary 2.9.9, Gunicorn 22.0.0. Dockerfile использует python:3.12-slim, системного пользователя app и exec-форму CMD. Исходники в образе принадлежат root с правами 644; процесс app (UID/GID 999) читает их, но touch /app/app.py получает Permission denied. Порт EXPOSE 5000 является метаданными.
+
+Доставка с Mac из корня репозитория, каждый новый вариант команды с --delete сначала в пробном режиме:
+
+```sh
+rsync -avz --delete --exclude=.env --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env app/ devops:app/
+```
+
+`/home/devops/app/.env` создаётся исключительно на VM, права 600, devops:devops. Его нельзя переносить на Mac или добавлять в Git. В `.gitignore` и `.dockerignore` исключён .env; `.env.example` содержит только имена переменных и change_me. Исключение --exclude=.env защищает серверный файл от --delete.
+
+```sh
+# VM, только при первоначальной установке; секрет не выводить в журнал
+cd /home/devops/app
+umask 077
+cp .env.example .env
+chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+docker compose ps
+```
+
+На действующем томе не пересоздавать .env с новым паролем: PostgreSQL инициализируется переменными только при создании пустой базы. Хранить исходный файл на VM. Compose-проект app создаёт сеть bridge `app_backend`, сервисы app и db. DNS-имя db разрешается внутри сети в IP контейнера PostgreSQL; localhost внутри app — сам контейнер. Проверка `docker compose exec -T app getent hosts db </dev/null`. При автоматическом запуске через bash -s перенаправление stdin предотвращает поглощение остатка сценария командой compose exec.
+
+Приложение опубликовано строго как `127.0.0.1:5000:5000`, база PostgreSQL 16-alpine не имеет ports. Проверять `sudo ss -tlnp` и `docker compose ps`: один хостовый сокет 127.0.0.1:5000, 5432 на хосте отсутствует. Зависимость app от db с condition service_healthy ждёт pg_isready (interval 5s, timeout 3s, retries 5), а не только запуска процесса. В healthcheck двойной $$ оставляет подстановку переменных оболочке внутри db.
+
+Именованный том `app_db_data` смонтирован в `/var/lib/postgresql/data`; данные сохраняются независимо от контейнеров. Фактическая проверка: обращения дали Visits 1, 2, 3; перед down — 4, после down/up — 5. Учебный опыт down -v удалил только этот вновь созданный тестовый том; после up получено Visits 1. Финальный том сохранён. Не применять -v к данным, которые требуется сохранить. Тег postgres:16-alpine удерживает основную версию формата данных.
+
+Снимок `05-docker-compose` (UUID a51f9995-936a-44a1-b579-8843a437f217) создан после штатного выключения VM. Содержит приложение, healthy-базу, .env и том; VM затем запущена. Живые снимки после затруднения с VirtualBox не используются.
+
+Обратный прокси добавлен в HTTPS-блок `/etc/nginx/sites-available/devops-site`; полная конфигурация сохранена в `config/nginx/devops-site.conf`:
+
+```nginx
+    location /app/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+```
+
+Завершающий / в proxy_pass заменяет /app/ на /; /app/health превращается в /health. Статический корень /var/www/devops-site сохранён. Применять только `sudo nginx -t && sudo systemctl reload nginx`. Восстановление: передать конфигурацию из репозитория как в разделе 8 и установить её теми же командами.
+
+Проверки с Mac: `curl -4 --cacert ~/devops.crt https://devops.local/app/`, `/app/health` и `-I https://devops.local/`. Временный контейнер exposed с -p 5001:5000 подтвердил доступность /health с Mac при отсутствии правила UFW 5001: Docker создаёт DNAT и перенаправляет трафик в FORWARD до обычных входящих правил UFW. Контейнер остановлен после опыта. Loopback-публикация штатного приложения исключает прямой сетевой доступ.
+
+При остановленном app запрос к /app/ получает 502; журнал /var/log/nginx/devops-site.error.log содержит connect() failed (111: Connection refused) while connecting to upstream. Отказ между Nginx и контейнером, TLS и сам Nginx доступны. Восстановить `cd /home/devops/app && docker compose start app`, дождаться /health и повторить запрос. Для полной остановки проекта использовать down без -v, для запуска — up -d.
+
+Раздел [5] scripts/audit.sh проверяет Docker active, app-db-1 healthy, отсутствие внешних слушателей 5000/5432 и права .env 600. Полный аудит — 14 проверок, код 0. Отрицательный опыт: временно в серверном docker-compose.yml публикация 5000:5000, compose up -d; обнаружены 0.0.0.0:5000 и [::]:5000, код 1. После возврата 127.0.0.1:5000:5000 и пересоздания app — код 0. Файл .env и том при проверке не изменяются.
+
+Для полного восстановления после снимка 01 последовательно выполнить разделы 1–8, установить Docker по разделу 9, доставить app/ с --exclude=.env, создать серверный секрет, поднять Compose, установить конфигурацию Nginx из репозитория и запустить аудит. Для сохранения существующих данных использовать имеющиеся .env и app_db_data. Секретов в репозитории нет.

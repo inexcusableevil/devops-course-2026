@@ -44,5 +44,12 @@ WORLD_WRITABLE="$(find /var/www/devops-site -perm -o+w 2>&1)"
 KEY_MODE="$(sudo stat -c '%a' /etc/ssl/private/devops.key)"
 [[ -z "$WORLD_WRITABLE" && "$KEY_MODE" == 600 ]] && WEB_PERMISSIONS=yes
 check "Нет записи для всех; закрытый ключ имеет права 600" "yes" "$WEB_PERMISSIONS"
+echo "[5] Контейнеризация"
+check "Служба docker активна" "active" "$(systemctl is-active docker)"
+check "Контейнер СУБД healthy" "healthy" "$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null)"
+UNSAFE_PORTS="$(ss -H -tln | awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127[.]0[.]0[.]1:/ {print $4}')"
+check "Порты 5000 и 5432 не доступны на внешних адресах" "" "$UNSAFE_PORTS"
+APP_DIR="$(getent passwd devops | cut -d: -f6)/app"
+check "Права файла .env равны 600" "600" "$(stat -c '%a' "${APP_DIR}/.env" 2>/dev/null)"
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

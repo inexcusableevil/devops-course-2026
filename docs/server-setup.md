@@ -131,6 +131,58 @@ sudo ss -tlnp | grep sshd
 
 4. На Mac изменить правило NAT на гостевой порт 2222 по разделу 3. В отдельном терминале проверить `ssh devops`, отказ root и отказ парольного входа. До успешной проверки исходное соединение не закрывать.
 5. На VM выполнить все команды UFW из раздела 6. Проверить новое подключение. Выполнить `sudo hostnamectl set-hostname devops-vm` и `sudo sed -i 's/^127.0.1.1.*/127.0.1.1 devops-vm.devops.local devops-vm/' /etc/hosts`, затем `sudo timedatectl set-timezone Europe/Moscow`.
-6. Доставить `scripts/audit.sh` в `/home/devops/scripts/audit.sh`, установить право выполнения `chmod +x`, запустить в терминале после `sudo -v`. Ожидается 6 успешных проверок и код 0; проверить подключение по `devops.local`.
+6. Для проверки именно состояния ПР №5 получить версию аудита `git show 1f40882:scripts/audit.sh > /tmp/audit-pr5.sh` на хосте и доставить её в `/home/devops/scripts/audit.sh`, установить право выполнения `chmod +x`, запустить в терминале после `sudo -v`. Ожидается 6 успешных проверок и код 0; проверить подключение по `devops.local`.
 
 Скрипт проверяет эффективную конфигурацию SSH, нестандартный порт, MaxAuthTries=3, активность UFW и политику deny. Отрицательный тест: временно MaxAuthTries=10 — одна ошибка и код 1; восстановить 3 и проверить `sshd -t`. Без TTY запускать `sudo scripts/audit.sh`, иначе sudo внутри дочернего процесса потребует интерактивного подтверждения.
+
+
+## 8. Веб-сервер
+
+Пакет Ubuntu `nginx`, фактически установлен 1.24.0-2ubuntu7.19. Главный процесс — root, рабочие — www-data. Каталог `/var/www/devops-site` принадлежит devops:devops, каталоги 755, файлы 644. www-data читает файлы, но не записывает их. Единственная активная конфигурация `/etc/nginx/sites-available/devops-site`; ссылка `/etc/nginx/sites-enabled/devops-site`. Её полное содержимое сохранено в `config/nginx/devops-site.conf`. Файл стандартного ресурса сохранён, отключена только ссылка `sites-enabled/default`.
+
+Восстановление веб-сервера после разделов 1–7:
+
+```sh
+# VM
+sudo apt update && sudo apt install -y nginx rsync
+sudo mkdir -p /var/www/devops-site
+sudo chown devops:devops /var/www/devops-site
+sudo chmod 755 /var/www/devops-site
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' -addext 'subjectAltName=DNS:devops.local'
+sudo chown root:root /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+# Mac, из корня репозитория
+scp config/nginx/devops-site.conf devops:/tmp/devops-site.conf
+# VM
+sudo install -o root -g root -m 644 /tmp/devops-site.conf /etc/nginx/sites-available/devops-site
+sudo ln -sfn /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/devops-site
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+# Mac
+scp devops:/etc/ssl/certs/devops.crt ~/devops.crt
+rsync -avz --delete --chmod=D755,F644 --dry-run site/ devops:/var/www/devops-site/
+rsync -avz --delete --chmod=D755,F644 site/ devops:/var/www/devops-site/
+curl -4 -I http://devops.local
+curl -4 --cacert ~/devops.crt -I https://devops.local
+```
+
+Закрытый ключ `/etc/ssl/private/devops.key` (root:root, 600) не копируется и не публикуется. Открытый сертификат `/etc/ssl/certs/devops.crt` (root:root, 644) передан на Mac через проверенное SSH-соединение. Срок — 365 дней: фактический сертификат выдан 30.10.2026 01:19:39 MSK и истекает 30.10.2027 01:19:39 MSK. SAN — DNS:devops.local; subject и issuer совпадают. При повторном выпуске сертификата нужно повторить безопасное копирование на клиента. Корневой процесс Nginx читает ключ до обслуживания запросов рабочими процессами.
+
+HTTP перенаправляется кодом 301 на HTTPS. HSTS для учебного самоподписанного сертификата не добавлен. Журнал HTTPS ресурса — `/var/log/nginx/devops-site.access.log`, ошибки — `/var/log/nginx/devops-site.error.log`. Блок HTTP не задаёт отдельный access_log, поэтому его перенаправления записываются в общий `/var/log/nginx/access.log`.
+
+На данном Mac встроенный openrsync (совместимый с 2.6.9) отклонил `--chmod=D755,F644`; установлена современная версия `brew install rsync`, фактически 3.5.1 в `/opt/homebrew/bin/rsync`. Проверять `command -v rsync` и `rsync --version`. В curl используется `-4`: имя .local на этом Mac при попытке разрешения обоих семейств адресов иногда приводило к задержке, тогда как IPv4 из hosts работал. В Chrome после очистки кэша имени пользователем сайт открылся.
+
+Сценарий `scripts/deploy.sh [--dry-run]` находит корень по расположению самого сценария, проверяет наличие index.html и чистоту Git, вызывает ровно один rsync через SSH с BatchMode=yes и ConnectTimeout=5, нормализует права и удаляет лишние файлы в каталоге назначения. Проверка HTTPS выполняется curl с --cacert, без -k. Dry-run не проверяет HTTP и не меняет сервер. Успех выводит короткий хеш коммита. На Mac ключ и профиль SSH настроены по разделу 4, сертификат находится в `~/devops.crt`.
+
+Пять обязательных сценариев проверены: dry-run — 0 и неизменный SHA256; изменение с коммитом — 0 и видно в браузере; незакоммиченное изменение (в том числе staged) — 1 без изменения SHA256 сервера; Nginx остановлен — синхронизация выполнена, HTTPS недоступен, код 1, служба затем запущена; index.html переименован с коммитом — 1 без удаления главной страницы на сервере, затем имя восстановлено отдельным коммитом.
+
+Диагностика прав: файл 600 → HTTP 403 и `open() ... failed (13: Permission denied)`; каталог 755 → 200, 750 → 403, 744 → 403, 711 → 200. Для каталога с недостатком x журнал содержит `is forbidden (13: Permission denied)`. При 744 www-data видит имена, но не читает файл; при 711 читает известное имя, но не получает список. Во всех опытах восстановлены 755/644. Доставка файла 666 без --chmod позволила www-data записать `<h1>defaced</h1>`; штатный деплой восстановил содержимое и 644, после чего www-data touch отклонён.
+
+Аудит содержит четыре проверки раздела [4]: активность Nginx, nginx -t, срок сертификата не менее 30 дней, отсутствие world-writable вместе с режимом ключа 600. Все 10 проверок проходят с кодом 0. `sudo env CERT_MIN_DAYS=400 scripts/audit.sh` даёт одну ошибку и код 1; временный chmod 666 index.html — также 1; после восстановления — 0. Для проверки в терминале VM достаточно sudo -v и запуска сценария; без TTY запускать весь сценарий через sudo.
+
+Создан снимок `04-nginx-https` (UUID ec12bad8-86b0-4fee-bc3d-381b99dda5cc) на выключенной VM после успешных проверок TLS, деплоя и прав. Попытка живого снимка затянулась, отменена; VirtualBox оставил VMM приостановленным при внешнем состоянии Running. После разрешённого владельцем принудительного выключения сделан обычный снимок, VM запущена заново и конфигурация проверена. Конфигурация, сертификат, ключ и снимки сохраняются для практической работы №7.
+
+Подготовка Docker: установлен официальный Docker Engine Community 29.9.2, Compose 5.6.1 из подписанного репозитория download.docker.com (Ubuntu noble/arm64), не docker.io. Учётная запись devops добавлена в docker (у неё уже есть sudo). Проверка `docker run hello-world` без sudo выполнена в новой группе через `sg docker -c`; получено Hello from Docker. Участник docker фактически имеет возможности root через подключение каталогов хоста. Полная последовательность установки сохранена в разделе 9 для восстановления конфигурации приложения.

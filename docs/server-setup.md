@@ -269,3 +269,35 @@ docker compose ps
 Раздел [5] scripts/audit.sh проверяет Docker active, app-db-1 healthy, отсутствие внешних слушателей 5000/5432 и права .env 600. Полный аудит — 14 проверок, код 0. Отрицательный опыт: временно в серверном docker-compose.yml публикация 5000:5000, compose up -d; обнаружены 0.0.0.0:5000 и [::]:5000, код 1. После возврата 127.0.0.1:5000:5000 и пересоздания app — код 0. Файл .env и том при проверке не изменяются.
 
 Для полного восстановления после снимка 01 последовательно выполнить разделы 1–8, установить Docker по разделу 9, доставить app/ с --exclude=.env, создать серверный секрет, поднять Compose, установить конфигурацию Nginx из репозитория и запустить аудит. Для сохранения существующих данных использовать имеющиеся .env и app_db_data. Секретов в репозитории нет.
+
+
+## 10. Ansible
+
+Проект: `ansible/`. Управляющий узел — macOS ARM64, Ansible Core 2.16.14 в отдельном venv; управляемый — Ubuntu Server 24.04 ARM64, `devops-vm`, Host-only `192.168.56.2`. До возврата к чистому снимку `01-clean-install` прежняя конфигурация сохранена в `08-before-ansible`. Архитектура адаптирована под ARM64: assert `aarch64`, официальный репозиторий Docker `arm64`; остальные задания сохранены.
+
+`inventory/bootstrap.ini` использует `student` и ключ `~/.ssh/devops_vm`, `inventory/prod.ini` — `devops` и тот же локальный ключ. Закрытый ключ не хранится в репозитории. sshpass не установился из-за устаревших Command Line Tools; применён предусмотренный методичкой bootstrap по ключу. Открытый ключ предварительно установлен для student, пароль sudo вводится интерактивно.
+
+Роли выполняются в порядке: `base` — зависимости, официальный Docker и служба; `ssh` — devops, открытый ключ, sudo, hardening и UFW; `nginx` — reverse proxy и проверяемый reload; `app` — загрузка проверенного образа до изменения контейнера, запуск и health-check. `force_handlers = True` сохраняет вызов уведомлённых handlers при отказе поздней задачи.
+
+Образ: `ghcr.io/inexcusableevil/devops-ci-app`. Полный тег проверенного коммита: `4a8e168f74b352811ef924843f789b69d6e2e29d`. Пакет публичный, для pull не требуется login. Контейнер `devops-ci-app`, публикация `127.0.0.1:5000:5000`, Nginx слушает 80, SSH — 22. Проверка приложения: `http://192.168.56.2/health`, ожидается `{"status":"ok"}`.
+
+На управляющем узле:
+
+```bash
+ansible-galaxy collection install -r ansible/requirements.yml
+cd ansible
+ansible-inventory -i inventory/bootstrap.ini --graph
+ansible-inventory --graph
+ansible-playbook -i inventory/bootstrap.ini site.yml --syntax-check
+ansible-playbook site.yml --syntax-check
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-become-pass
+ansible all -m ping
+ansible-playbook site.yml
+ansible-playbook verify.yml
+```
+
+Для установленного в рамках работы venv добавьте `work/pr9-11/ansible-venv/bin` к PATH, а `ANSIBLE_COLLECTIONS_PATH` укажите на `work/pr9-11/collections` (пути относительно корня локальной рабочей папки, не этого репозитория). При обычной установке коллекций в каталог Ansible это не требуется.
+
+В текущей сети исходящие DNS-запросы VM не доходили до DNS; временный сервер `work/pr9-11/dns-forwarder.py` на Mac пересылает запросы через системный resolver. На VM добавлен `/etc/systemd/resolved.conf.d/90-lab-host-dns.conf`: DNS `192.168.56.1:1053`, route domain `~.`. Это сетевое условие лабораторной среды, вне ролей приложения. Перед повторным запуском в той же сети запустите на Mac `python3 work/pr9-11/dns-forwarder.py`. В сети с рабочим DNS удалите только этот лабораторный drop-in и перезапустите systemd-resolved. Проверка TLS не отключалась.
+
+Проверено: bootstrap `ok=27 changed=18 failed=0`; немедленный повтор `ok=24 changed=0 failed=0`; drift контейнера и upstream восстановлен плейбуком; несуществующий тег остановил pull до замены рабочего контейнера; read-only аудит дважды `ok=7 changed=0 failed=0`, остановленный контейнер обнаружен отрицательной проверкой. После аудита состояние восстановлено `site.yml`.

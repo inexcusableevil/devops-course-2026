@@ -1,0 +1,6 @@
+---
+app_image: "ghcr.io/inexcusableevil/devops-ci-app"
+app_tag: "4a8e168f74b352811ef924843f789b69d6e2e29d"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
